@@ -69,6 +69,7 @@ export const SettingsView: React.FC = () => {
     config,
     backupCount,
     brandLogos,
+    isRefetchingLogos,
     appearanceMode,
     setAppearanceMode,
     language,
@@ -94,6 +95,7 @@ export const SettingsView: React.FC = () => {
     exportGearCsv,
     undoLastGearChange,
     refreshBrandLogos,
+    clearAndRefetchAllBrandLogos,
     showToast,
     triggerBackupNow,
     openActiveDataFolder,
@@ -672,6 +674,23 @@ export const SettingsView: React.FC = () => {
 
               <button
                 type="button"
+                disabled={isRefetchingLogos}
+                onClick={() => void clearAndRefetchAllBrandLogos()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--wsj-border)] bg-[var(--wsj-card)] px-3.5 py-2 text-[13px] font-medium text-[var(--wsj-text)] transition hover:bg-[var(--wsj-subtle)] disabled:opacity-45"
+              >
+                {isRefetchingLogos ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-[var(--wsj-accent)]" />
+                ) : (
+                  <RotateCcw className="h-4 w-4 text-[var(--wsj-accent)]" />
+                )}
+                {isRefetchingLogos
+                  ? t("正在重抓品牌 Logo...", "Refetching Brand Logos...", isEnglish)
+                  : t("清理并重抓品牌 Logo", "Clear & Refetch Brand Logos", isEnglish)}
+              </button>
+
+              <button
+                type="button"
+                disabled={isRefetchingLogos}
                 onClick={() => {
                   void refreshBrandLogos().then(() => {
                     showToast(
@@ -683,7 +702,7 @@ export const SettingsView: React.FC = () => {
                     );
                   });
                 }}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--wsj-border)] bg-[var(--wsj-card)] px-3.5 py-2 text-[13px] font-medium text-[var(--wsj-text)] transition hover:bg-[var(--wsj-subtle)]"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--wsj-border)] bg-[var(--wsj-card)] px-3.5 py-2 text-[13px] font-medium text-[var(--wsj-text)] transition hover:bg-[var(--wsj-subtle)] disabled:opacity-45"
               >
                 <RefreshCw className="h-4 w-4 text-[var(--wsj-text-secondary)]" />
                 {t("重新加载品牌图标", "Reload Brand Logos", isEnglish)}
@@ -692,8 +711,8 @@ export const SettingsView: React.FC = () => {
 
             <p className="text-[12px] leading-relaxed text-[var(--wsj-text-tertiary)]">
               {t(
-                "支持直接复用 Mac 版数据目录下的 CustomLogos/ 与 LogoCache/ 品牌图标，也可在「器材库 → 编辑器材」中点击品牌头像上传本地自定义图标。",
-                "Automatically reads CustomLogos/ and LogoCache/ from the active data folder (100% compatible with macOS), or upload custom brand logos from the Gear Editor.",
+                "支持自动从品牌官网联网抓取 Logo 并缓存至 LogoCache/（内置反 Etsy 黑名单），同时直接复用 Mac 版 CustomLogos/ 与 LogoCache/；「清理并重抓」仅清空 LogoCache/，绝不覆盖 CustomLogos/ 中的自定义图标。",
+                "Automatically fetches official brand logos into LogoCache/ (with anti-Etsy blacklist) while sharing CustomLogos/ and LogoCache/ with macOS. Clear & Refetch only clears LogoCache/ and never overwrites CustomLogos/.",
                 isEnglish
               )}
             </p>
@@ -831,7 +850,7 @@ export const SettingsView: React.FC = () => {
                   <span className="text-[17px] font-bold text-[var(--wsj-text)]">
                     {t("湿剃日记", "WetShaveJournal", isEnglish)}
                   </span>
-                  <TagPill text="v1.3.4" tone="accent" />
+                  <TagPill text="v1.3.5" tone="accent" />
                   <TagPill text="Windows · Tauri 2" tone="neutral" />
                 </div>
                 <p className="text-[13px] leading-relaxed text-[var(--wsj-text-secondary)]">

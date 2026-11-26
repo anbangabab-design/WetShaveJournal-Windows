@@ -7,6 +7,7 @@ import type {
   AiConnectionTestResponse,
   AppConfigInfo,
   BackupResponse,
+  BrandLogoFetchResponse,
   CustomLogoResponse,
   DownloadProgressEvent,
   JournalDatabase,
@@ -82,6 +83,22 @@ export async function setCustomBrandLogo(
   return invoke<CustomLogoResponse>("set_custom_brand_logo", {
     brand,
     sourcePath,
+  });
+}
+
+export async function fetchMissingBrandLogos(
+  brands: string[]
+): Promise<BrandLogoFetchResponse> {
+  return invoke<BrandLogoFetchResponse>("fetch_missing_brand_logos", {
+    brands,
+  });
+}
+
+export async function clearAndRefetchBrandLogos(
+  brands: string[]
+): Promise<BrandLogoFetchResponse> {
+  return invoke<BrandLogoFetchResponse>("clear_and_refetch_brand_logos", {
+    brands,
   });
 }
 

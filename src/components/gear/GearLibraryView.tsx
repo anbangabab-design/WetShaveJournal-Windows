@@ -131,8 +131,13 @@ export const GearLibraryView: React.FC = () => {
     catalogSnapshot,
     isEnglish,
     isReadOnlyProtected,
+    triggerMissingLogosFetch,
     undoLastGearChange,
   } = useJournal();
+
+  useEffect(() => {
+    void triggerMissingLogosFetch();
+  }, [triggerMissingLogosFetch]);
 
   const [selectedCategory, setSelectedCategory] =
     useState<GearCategory>("剃须刀");

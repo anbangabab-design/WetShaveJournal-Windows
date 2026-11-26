@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter};
 use url::Url;
 
 pub const GITHUB_REPO: &str = "anbangabab-design/WetShaveJournal-Windows";
-pub const CURRENT_VERSION: &str = "1.3.4";
+pub const CURRENT_VERSION: &str = "1.3.5";
 
 const ALLOWED_CDN_HOSTS: &[&str] = &[
     "objects.githubusercontent.com",

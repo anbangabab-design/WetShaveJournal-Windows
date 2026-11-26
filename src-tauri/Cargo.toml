@@ -1,6 +1,6 @@
 [package]
 name = "wetshave-journal-windows"
-version = "1.3.4"
+version = "1.3.5"
 description = "湿剃日记 Windows 版 · WetShaveJournal for Windows"
 authors = ["WetShaveJournal"]
 edition = "2021"

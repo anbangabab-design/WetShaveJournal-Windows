@@ -529,6 +529,14 @@ export interface CustomLogoResponse {
   dataUrl: string;
 }
 
+export interface BrandLogoFetchResponse {
+  logos: Record<string, string>;
+  fetchedCount: number;
+  failedCount: number;
+  skippedCount: number;
+  failedKeys: string[];
+}
+
 export interface ToastState {
   id: string;
   message: string;

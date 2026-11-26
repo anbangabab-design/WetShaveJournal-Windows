@@ -6,6 +6,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -40,3 +43,25 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WetShaveJournal ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          body: |
+            ## English
+            - Full Windows desktop release of WetShaveJournal (100% compatible with macOS `journal.json`).
+            - Added automatic official brand logo fetching into `LogoCache/` (with anti-Etsy blacklist and `CustomLogos/` protection) plus "Clear & Refetch Brand Logos" in Settings.
+            - Includes Statistics charts, 4 AI shaving tools (Windows Credential Manager key storage), and FlClash-style GitHub online updates.
+
+            ## 简体中文
+            - 湿剃日记 Windows 桌面版正式构建（与 macOS 版 `journal.json` 100% 互通）。
+            - 新增品牌官网 Logo 自动联网抓取至 `LogoCache/`（内置反 Etsy 黑名单，绝不覆盖 `CustomLogos/` 自定义图标），并在设置页新增「清理并重抓品牌 Logo」。
+            - 完整包含数据统计图表、4 大 AI 功能（Windows 凭据管理器安全存储 Key）与 FlClash 风格 GitHub 联网更新。

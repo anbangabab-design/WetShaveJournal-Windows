@@ -42,9 +42,11 @@ import {
   cancelUpdateDownload,
   checkForUpdates,
   clearAiApiKey,
+  clearAndRefetchBrandLogos,
   downloadAndOpenUpdate,
   exportCsvFile,
   exportJournal,
+  fetchMissingBrandLogos,
   getAiApiKey,
   getAppConfig,
   importJournal,
@@ -249,8 +251,11 @@ interface JournalContextValue {
   getGearReferencedEntryCount: (item: GearItem) => number;
 
   brandLogos: Record<string, string>;
+  isRefetchingLogos: boolean;
   getBrandLogo: (brand: string) => string | null;
   refreshBrandLogos: () => Promise<void>;
+  triggerMissingLogosFetch: () => Promise<void>;
+  clearAndRefetchAllBrandLogos: () => Promise<void>;
   uploadCustomBrandLogo: (brand: string) => Promise<boolean>;
 
   reloadJournal: () => Promise<void>;
@@ -308,6 +313,14 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
   const [loadErrorMessage, setLoadErrorMessage] = useState<string | null>(null);
   const [backupCount, setBackupCount] = useState<number>(0);
   const [brandLogos, setBrandLogos] = useState<Record<string, string>>({});
+  const [isRefetchingLogos, setIsRefetchingLogos] = useState<boolean>(false);
+  const brandLogosRef = useRef<Record<string, string>>({});
+  const attemptedLogoKeysRef = useRef<Set<string>>(new Set());
+  const isFetchingMissingLogosRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    brandLogosRef.current = brandLogos;
+  }, [brandLogos]);
 
   // AI 配置状态（API Key 永不落地配置文件，仅从系统凭据管理器读写）
   const [aiConfig, setAiConfig] = useState<AIConfigState>({
@@ -955,6 +968,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       ]);
       setDatabase(normalizeLoadedDatabase(loaded.data));
       setBackupCount(loaded.backupCount);
+      attemptedLogoKeysRef.current.clear();
       setBrandLogos(logos);
       setIsReadOnlyProtected(false);
       setLoadErrorMessage(null);
@@ -978,6 +992,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       ]);
       setDatabase(normalizeLoadedDatabase(loaded.data));
       setBackupCount(loaded.backupCount);
+      attemptedLogoKeysRef.current.clear();
       setBrandLogos(logos);
       setIsReadOnlyProtected(false);
       setLoadErrorMessage(null);
@@ -1418,6 +1433,156 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
     [database]
   );
 
+  // 收集全部去重品牌列表（主品牌 + 剃须刷手柄品牌，排除「仿刀 / 品牌未注明 / 无品牌」）
+  const allCatalogBrands = useMemo<string[]>(() => {
+    const byKey = new Map<string, string>();
+    const addBrand = (raw?: string) => {
+      const trimmed = (raw ?? "").trim();
+      if (
+        !trimmed ||
+        trimmed === "仿刀" ||
+        trimmed === "品牌未注明" ||
+        trimmed === "无品牌"
+      ) {
+        return;
+      }
+      const key = normalizedBrandKey(trimmed);
+      if (key && !byKey.has(key)) {
+        byKey.set(key, trimmed);
+      }
+    };
+    for (const cat of ALL_GEAR_CATEGORIES) {
+      for (const item of catalogSnapshot.itemsByCategory[cat] ?? []) {
+        addBrand(item.brand);
+        addBrand(item.handleBrand);
+      }
+    }
+    return Array.from(byKey.values());
+  }, [catalogSnapshot]);
+
+  // 后台静默抓取缺失品牌 Logo（同一会话对失败品牌去重，绝不重复请求或覆盖 CustomLogos）
+  const triggerMissingLogosFetch = useCallback(async () => {
+    if (
+      !isTauriRuntime() ||
+      isLoading ||
+      isFetchingMissingLogosRef.current ||
+      allCatalogBrands.length === 0
+    ) {
+      return;
+    }
+
+    const currentLogos = brandLogosRef.current;
+    const missingBrands: string[] = [];
+    for (const brand of allCatalogBrands) {
+      const key = normalizedBrandKey(brand);
+      if (!key) continue;
+      if (currentLogos[key]) continue;
+      if (attemptedLogoKeysRef.current.has(key)) continue;
+      missingBrands.push(brand);
+    }
+
+    if (missingBrands.length === 0) return;
+
+    for (const brand of missingBrands) {
+      const key = normalizedBrandKey(brand);
+      if (key) attemptedLogoKeysRef.current.add(key);
+    }
+
+    isFetchingMissingLogosRef.current = true;
+    try {
+      const res = await fetchMissingBrandLogos(missingBrands);
+      if (res.logos && Object.keys(res.logos).length > 0) {
+        setBrandLogos((prev) => ({
+          ...prev,
+          ...res.logos,
+        }));
+      }
+      for (const failedKey of res.failedKeys ?? []) {
+        attemptedLogoKeysRef.current.add(failedKey);
+      }
+    } catch {
+      // 后台静默抓取失败不打扰用户，保留首字徽章兜底
+    } finally {
+      isFetchingMissingLogosRef.current = false;
+    }
+  }, [allCatalogBrands, isLoading]);
+
+  // 应用加载完成及品牌列表更新后，自动在后台静默拉取尚未缓存的品牌 Logo
+  useEffect(() => {
+    if (isLoading || !isTauriRuntime() || allCatalogBrands.length === 0) return;
+    void triggerMissingLogosFetch();
+  }, [allCatalogBrands, isLoading, triggerMissingLogosFetch]);
+
+  // 手动清理 LogoCache 并并发重抓全部品牌 Logo（完整保留 CustomLogos 自定义图标）
+  const clearAndRefetchAllBrandLogos = useCallback(async () => {
+    if (isRefetchingLogos) return;
+    if (!isTauriRuntime()) {
+      showToast(
+        t(
+          "请在桌面客户端中清理并重抓品牌 Logo",
+          "Available in desktop app only",
+          isEnglish
+        )
+      );
+      return;
+    }
+
+    setIsRefetchingLogos(true);
+    isFetchingMissingLogosRef.current = true;
+    attemptedLogoKeysRef.current.clear();
+    showToast(
+      t(
+        "正在清理 LogoCache 并重新抓取品牌 Logo...",
+        "Clearing LogoCache and refetching brand logos...",
+        isEnglish
+      ),
+      { isLoading: true }
+    );
+
+    try {
+      const res = await clearAndRefetchBrandLogos(allCatalogBrands);
+      setBrandLogos(res.logos ?? {});
+      for (const brand of allCatalogBrands) {
+        const key = normalizedBrandKey(brand);
+        if (key) attemptedLogoKeysRef.current.add(key);
+      }
+      for (const failedKey of res.failedKeys ?? []) {
+        attemptedLogoKeysRef.current.add(failedKey);
+      }
+
+      if (allCatalogBrands.length === 0) {
+        showToast(
+          t(
+            "已清理自动抓取的品牌 Logo 缓存（自定义图标已保留）",
+            "Cleared auto-fetched logo cache (custom logos preserved)",
+            isEnglish
+          )
+        );
+      } else {
+        showToast(
+          t(
+            `品牌 Logo 重抓完成：成功 ${res.fetchedCount}，未命中 ${res.failedCount}（自定义图标已保留）`,
+            `Brand logos refreshed: ${res.fetchedCount} fetched, ${res.failedCount} missed (custom logos preserved)`,
+            isEnglish
+          )
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(
+        t(
+          `清理并重抓品牌 Logo 失败：${msg}`,
+          `Failed to refresh brand logos: ${msg}`,
+          isEnglish
+        ),
+        { isError: true }
+      );
+    } finally {
+      isFetchingMissingLogosRef.current = false;
+      setIsRefetchingLogos(false);
+    }
+  }, [allCatalogBrands, isEnglish, isRefetchingLogos, showToast]);
+
   const allPendingGearItems = useMemo(() => {
     const pending: GearItem[] = [];
     for (const cat of ALL_GEAR_CATEGORIES) {
@@ -1622,8 +1787,11 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       getGearRawEntrySamples,
       getGearReferencedEntryCount,
       brandLogos,
+      isRefetchingLogos,
       getBrandLogo,
       refreshBrandLogos,
+      triggerMissingLogosFetch,
+      clearAndRefetchAllBrandLogos,
       uploadCustomBrandLogo,
       reloadJournal,
       upsertEntry,
@@ -1658,6 +1826,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       checkForAppUpdates,
       checkRazorAdjustable,
       chooseCustomDataDir,
+      clearAndRefetchAllBrandLogos,
       clearApiKeyFromKeyring,
       config,
       copySOTD,
@@ -1685,6 +1854,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       isEnglish,
       isLoading,
       isReadOnlyProtected,
+      isRefetchingLogos,
       language,
       loadApiKeyFromKeyring,
       loadErrorMessage,
@@ -1707,6 +1877,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       statisticsSnapshot,
       toast,
       triggerBackupNow,
+      triggerMissingLogosFetch,
       undoLastGearChange,
       updateAiConfig,
       updateDownloadState,

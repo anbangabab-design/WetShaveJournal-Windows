@@ -9,7 +9,7 @@ use config::{
     build_config_response, load_persisted_config, resolve_active_data_dir, save_persisted_config,
     AppConfigResponse,
 };
-use logos::CustomLogoResult;
+use logos::{BrandLogoFetchResult, CustomLogoResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -215,6 +215,22 @@ fn set_custom_brand_logo(brand: String, source_path: String) -> Result<CustomLog
 }
 
 #[tauri::command]
+async fn fetch_missing_brand_logos(brands: Vec<String>) -> Result<BrandLogoFetchResult, String> {
+    let cfg = load_persisted_config()?;
+    let active_dir = resolve_active_data_dir(&cfg)?;
+    logos::fetch_missing_brand_logos(active_dir, brands).await
+}
+
+#[tauri::command]
+async fn clear_and_refetch_brand_logos(
+    brands: Vec<String>,
+) -> Result<BrandLogoFetchResult, String> {
+    let cfg = load_persisted_config()?;
+    let active_dir = resolve_active_data_dir(&cfg)?;
+    logos::clear_and_refetch_brand_logos(active_dir, brands).await
+}
+
+#[tauri::command]
 fn export_csv(target_path: String, content: String) -> Result<String, String> {
     let target = PathBuf::from(target_path);
     storage::export_text_file(&target, &content)
@@ -250,6 +266,8 @@ pub fn run() {
             open_data_folder,
             load_brand_logos,
             set_custom_brand_logo,
+            fetch_missing_brand_logos,
+            clear_and_refetch_brand_logos,
             export_csv,
         ])
         .run(tauri::generate_context!())
