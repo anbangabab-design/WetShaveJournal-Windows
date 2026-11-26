@@ -6,6 +6,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Sparkles,
   Trash2,
   Undo2,
   X,
@@ -51,6 +52,7 @@ import {
 } from "../../types/journal";
 import { BrandAvatar } from "../ui/BrandAvatar";
 import { TagPill } from "../ui/TagPill";
+import { AIHealthCheckModal } from "./AIHealthCheckModal";
 import { GearCard } from "./GearCard";
 import { GearDeleteDialog } from "./GearDeleteDialog";
 import { GearEditorModal } from "./GearEditorModal";
@@ -169,6 +171,7 @@ export const GearLibraryView: React.FC = () => {
   // 弹窗与菜单状态
   const [editingItem, setEditingItem] = useState<GearItem | null>(null);
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showAIAuditModal, setShowAIAuditModal] = useState(false);
   const [itemToDelete, setItemToDelete] = useState<GearItem | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
@@ -415,6 +418,17 @@ export const GearLibraryView: React.FC = () => {
               {t("撤销", "Undo", isEnglish)}
             </button>
           )}
+
+          {/* AI 体检 */}
+          <button
+            type="button"
+            disabled={isReadOnlyProtected}
+            onClick={() => setShowAIAuditModal(true)}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--wsj-border)] bg-[var(--wsj-card)] px-3 py-1.5 text-[13px] font-medium text-[var(--wsj-text)] transition hover:bg-[var(--wsj-subtle)] disabled:opacity-45"
+          >
+            <Sparkles className="h-3.5 w-3.5 text-[var(--wsj-accent)]" />
+            {t("AI 体检", "AI Audit", isEnglish)}
+          </button>
 
           {/* 新增器材 */}
           <button
@@ -898,6 +912,13 @@ export const GearLibraryView: React.FC = () => {
         item={null}
         defaultCategory={selectedCategory}
         onClose={() => setShowNewModal(false)}
+      />
+
+      {/* AI 器材库体检弹窗 */}
+      <AIHealthCheckModal
+        open={showAIAuditModal}
+        initialCategory={selectedCategory}
+        onClose={() => setShowAIAuditModal(false)}
       />
 
       {/* 删除器材弹窗 */}

@@ -2,6 +2,8 @@ import {
   ALL_GEAR_CATEGORIES,
   type BladeType,
   type BrandGroup,
+  type GearAuditMergeProposal,
+  type GearAuditUpdateProposal,
   type GearCategory,
   type GearEntryFieldSnapshot,
   type GearHistorySnapshot,
@@ -954,6 +956,123 @@ export function planUndoLastGearChange(
       history: nextHistory,
     },
     shouldBackup: restoredEntriesCount > 0,
+    toastMessage,
+    didMutate: true,
+  };
+}
+
+/** 批量应用 AI 体检建议（带规格冲突护栏与完整撤销快照） */
+export function planApplyAuditProposals(
+  updates: GearAuditUpdateProposal[],
+  merges: GearAuditMergeProposal[],
+  undeterminedItems: GearItem[],
+  db: JournalDatabase,
+  isEn: boolean
+): GearMutationPlan {
+  const chosenUpdates = updates.filter((u) => u.selected);
+  const chosenMerges = merges.filter((m) => m.selected);
+
+  if (
+    chosenUpdates.length === 0 &&
+    chosenMerges.length === 0 &&
+    undeterminedItems.length === 0
+  ) {
+    return {
+      database: db,
+      shouldBackup: false,
+      toastMessage: "",
+      didMutate: false,
+    };
+  }
+
+  const nextOverrides: Record<string, GearOverride> = { ...db.overrides };
+  const pendingSet = new Set<string>(db.pending);
+  let appliedUpdates = 0;
+  let appliedMerges = 0;
+  let skippedMerges = 0;
+
+  for (const u of chosenUpdates) {
+    const clean = sanitizeOverride(u.proposed, u.item.category);
+    const targetKeys =
+      u.item.rawKeys.length > 0 ? u.item.rawKeys : [u.item.canonicalKey];
+    for (const key of targetKeys) {
+      nextOverrides[key] = clean;
+      if (u.confidence >= 0.72) {
+        pendingSet.delete(key);
+      } else {
+        pendingSet.add(key);
+      }
+    }
+    const newNormKey = `${u.item.category}|${normalizeKey(clean.name)}`;
+    nextOverrides[newNormKey] = clean;
+    if (u.confidence >= 0.72) {
+      pendingSet.delete(newNormKey);
+    } else {
+      pendingSet.add(newNormKey);
+    }
+    appliedUpdates += 1;
+  }
+
+  // 无法可靠核验的条目显式标为「待确认」，绝不编造参数
+  for (const unc of undeterminedItems) {
+    const keys = unc.rawKeys.length > 0 ? unc.rawKeys : [unc.canonicalKey];
+    for (const key of keys) {
+      pendingSet.add(key);
+    }
+  }
+
+  const mergedAwayKeys = new Set<string>();
+  for (const m of chosenMerges) {
+    const conflict = checkGearMergeConflict(m.source, m.target, isEn);
+    if (conflict) {
+      skippedMerges += 1;
+      continue;
+    }
+    const srcKeyOverlap = m.source.rawKeys.some((k) => mergedAwayKeys.has(k));
+    const dstKeyOverlap = m.target.rawKeys.some((k) => mergedAwayKeys.has(k));
+    if (srcKeyOverlap || dstKeyOverlap) {
+      skippedMerges += 1;
+      continue;
+    }
+
+    const targetOv = sanitizeOverride(
+      overrideFromGearItem(m.target),
+      m.target.category
+    );
+    const srcNormKey = `${m.source.category}|${normalizeKey(m.source.name)}`;
+    for (const key of m.source.rawKeys) {
+      nextOverrides[key] = targetOv;
+      pendingSet.delete(key);
+      mergedAwayKeys.add(key);
+    }
+    nextOverrides[srcNormKey] = targetOv;
+    pendingSet.delete(srcNormKey);
+    mergedAwayKeys.add(srcNormKey);
+    appliedMerges += 1;
+  }
+
+  const nextHistory = pushHistorySnapshot(db);
+  const toastMessage =
+    skippedMerges > 0
+      ? t(
+          `已应用 AI 体检：更新 ${appliedUpdates} 项，合并 ${appliedMerges} 组，跳过 ${skippedMerges} 组冲突项`,
+          `Applied AI audit: ${appliedUpdates} updated, ${appliedMerges} merged, ${skippedMerges} skipped`,
+          isEn
+        )
+      : t(
+          `已应用 AI 体检：更新 ${appliedUpdates} 项，合并 ${appliedMerges} 组`,
+          `Applied AI audit: ${appliedUpdates} updated, ${appliedMerges} merged`,
+          isEn
+        );
+
+  return {
+    database: {
+      ...db,
+      overrides: nextOverrides,
+      pending: Array.from(pendingSet),
+      history: nextHistory,
+    },
+    shouldBackup: true,
     toastMessage,
     didMutate: true,
   };

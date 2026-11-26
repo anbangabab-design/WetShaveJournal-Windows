@@ -24,6 +24,7 @@ import {
   getRawEntrySamples,
   getReferencedEntryCount,
   normalizedBrandKey,
+  planApplyAuditProposals,
   planDeleteGearItem,
   planMergeGearItem,
   planSplitRawKey,
@@ -33,36 +34,59 @@ import {
 import { resolveIsEnglish, t } from "../lib/l10n";
 import { getProcessText, parseProcessText } from "../lib/processParser";
 import {
+  buildDiagnosisStatsSummary,
+  buildStatisticsSnapshot,
+} from "../lib/statisticsEngine";
+import {
   backupNow,
+  cancelUpdateDownload,
+  checkForUpdates,
+  clearAiApiKey,
+  downloadAndOpenUpdate,
   exportCsvFile,
   exportJournal,
+  getAiApiKey,
   getAppConfig,
   importJournal,
   isTauriRuntime,
+  listenUpdateDownloadProgress,
   loadBrandLogos,
   loadJournal,
   openDataFolder,
+  openExternalUrl,
   pickBrandLogoImageDialog,
   pickDirectoryDialog,
   pickExportCsvDialog,
   pickExportJsonDialog,
   pickImportJsonDialog,
+  revealFileInFolder,
+  saveAiConfig,
   saveJournal,
   savePreferences,
+  saveUpdatePreferences,
+  setAiApiKey,
   setCustomBrandLogo,
   setCustomDataDir,
 } from "../lib/tauriApi";
-import type {
-  AppConfigInfo,
-  AppearanceMode,
-  AppLanguage,
-  GearCategory,
-  GearItem,
-  GearOverride,
-  JournalDatabase,
-  JournalEntry,
-  ParsedProcess,
-  ToastState,
+import {
+  ALL_GEAR_CATEGORIES,
+  type AIConfigState,
+  type AIPreset,
+  type AppConfigInfo,
+  type AppearanceMode,
+  type AppLanguage,
+  type GearAuditMergeProposal,
+  type GearAuditUpdateProposal,
+  type GearCategory,
+  type GearItem,
+  type GearOverride,
+  type JournalDatabase,
+  type JournalEntry,
+  type ParsedProcess,
+  type ReleaseInfo,
+  type StatisticsSnapshot,
+  type ToastState,
+  type UpdateDownloadState,
 } from "../types/journal";
 
 const APPLE_REF_OFFSET = 978307200;
@@ -175,8 +199,36 @@ interface JournalContextValue {
   dismissToast: () => void;
 
   catalogSnapshot: GearCatalogSnapshot;
+  statisticsSnapshot: StatisticsSnapshot;
+  allPendingGearItems: GearItem[];
   parsedProcessByEntryID: Record<string, ParsedProcess>;
   entriesByDate: Record<string, JournalEntry[]>;
+  getDiagnosisStatsSummary: () => string;
+
+  // AI 配置与系统凭据管理器
+  aiConfig: AIConfigState;
+  updateAiConfig: (next: Partial<Omit<AIConfigState, "hasApiKey">>) => Promise<void>;
+  saveApiKeyToKeyring: (apiKey: string) => Promise<boolean>;
+  clearApiKeyFromKeyring: () => Promise<boolean>;
+  loadApiKeyFromKeyring: () => Promise<string>;
+
+  // GitHub 联网更新状态与控制
+  autoCheckUpdates: boolean;
+  setAutoCheckUpdates: (enabled: boolean) => void;
+  ignoredUpdateVersion: string;
+  isCheckingUpdate: boolean;
+  availableUpdate: ReleaseInfo | null;
+  updateStatusMessage: string | null;
+  updateStatusIsError: boolean;
+  updateStatusIsUpToDate: boolean;
+  updateDownloadState: UpdateDownloadState;
+  checkForAppUpdates: (manual: boolean) => Promise<void>;
+  startUpdateDownload: () => Promise<void>;
+  cancelAppUpdateDownload: () => Promise<void>;
+  ignoreAvailableUpdate: () => Promise<void>;
+  dismissUpdateModal: () => void;
+  openExternalLink: (url: string) => Promise<void>;
+  revealDownloadedFile: (filePath: string) => Promise<void>;
 
   getParsedProcess: (entry: JournalEntry) => ParsedProcess;
   resolveGearItem: (
@@ -227,6 +279,11 @@ interface JournalContextValue {
     item: GearItem,
     removeFromEntries: boolean
   ) => Promise<{ ok: boolean; error?: string }>;
+  applyAuditProposals: (
+    updates: GearAuditUpdateProposal[],
+    merges: GearAuditMergeProposal[],
+    undeterminedItems: GearItem[]
+  ) => Promise<{ ok: boolean; error?: string }>;
   undoLastGearChange: () => Promise<{ ok: boolean; error?: string }>;
   copySOTD: (entry: JournalEntry) => Promise<void>;
 
@@ -251,6 +308,48 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
   const [loadErrorMessage, setLoadErrorMessage] = useState<string | null>(null);
   const [backupCount, setBackupCount] = useState<number>(0);
   const [brandLogos, setBrandLogos] = useState<Record<string, string>>({});
+
+  // AI 配置状态（API Key 永不落地配置文件，仅从系统凭据管理器读写）
+  const [aiConfig, setAiConfig] = useState<AIConfigState>({
+    enabled: false,
+    preset: "deepseek",
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-flash",
+    enableWebSearch: true,
+    enableGoogleSearch: false,
+    hasApiKey: false,
+  });
+
+  // GitHub 联网更新状态
+  const [autoCheckUpdates, setAutoCheckUpdatesState] = useState<boolean>(true);
+  const [ignoredUpdateVersion, setIgnoredUpdateVersion] = useState<string>("");
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState<boolean>(false);
+  const [availableUpdate, setAvailableUpdate] = useState<ReleaseInfo | null>(null);
+  const [updateStatusMessage, setUpdateStatusMessage] = useState<string | null>(
+    null
+  );
+  const [updateStatusIsError, setUpdateStatusIsError] = useState<boolean>(false);
+  const [updateStatusIsUpToDate, setUpdateStatusIsUpToDate] =
+    useState<boolean>(false);
+  const [updateDownloadState, setUpdateDownloadState] =
+    useState<UpdateDownloadState>({ status: "idle" });
+  const hasPerformedLaunchUpdateCheckRef = useRef<boolean>(false);
+
+  const syncStateFromConfig = useCallback((cfg: AppConfigInfo) => {
+    setConfig(cfg);
+    const preset: AIPreset = cfg.aiPreset === "custom" ? "custom" : "deepseek";
+    setAiConfig({
+      enabled: Boolean(cfg.aiEnabled),
+      preset,
+      baseUrl: cfg.aiBaseUrl || "https://api.deepseek.com/v1",
+      model: cfg.aiModel || "deepseek-flash",
+      enableWebSearch: Boolean(cfg.aiEnableWebSearch),
+      enableGoogleSearch: Boolean(cfg.aiEnableGoogleSearch),
+      hasApiKey: Boolean(cfg.hasAiApiKey),
+    });
+    setAutoCheckUpdatesState(Boolean(cfg.autoCheckUpdates));
+    setIgnoredUpdateVersion(cfg.ignoredUpdateVersion ?? "");
+  }, []);
 
   const [appearanceMode, setAppearanceModeState] = useState<AppearanceMode>(() =>
     parseAppearance(
@@ -438,7 +537,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
           loadJournal(),
           loadBrandLogos().catch(() => ({} as Record<string, string>)),
         ]);
-        setConfig(cfg);
+        syncStateFromConfig(cfg);
         setDatabase(normalizeLoadedDatabase(loaded.data));
         setBackupCount(loaded.backupCount);
         setBrandLogos(logos);
@@ -459,6 +558,15 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
           backupsDirPath: "%APPDATA%\\WetShaveJournal\\Backups",
           appearanceMode,
           language,
+          aiEnabled: aiConfig.enabled,
+          aiPreset: aiConfig.preset,
+          aiBaseUrl: aiConfig.baseUrl,
+          aiModel: aiConfig.model,
+          aiEnableWebSearch: aiConfig.enableWebSearch,
+          aiEnableGoogleSearch: aiConfig.enableGoogleSearch,
+          hasAiApiKey: aiConfig.hasApiKey,
+          autoCheckUpdates,
+          ignoredUpdateVersion,
         });
         setIsReadOnlyProtected(false);
         setLoadErrorMessage(null);
@@ -478,7 +586,16 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
     } finally {
       setIsLoading(false);
     }
-  }, [appearanceMode, isEnglish, language, showToast]);
+  }, [
+    aiConfig,
+    appearanceMode,
+    autoCheckUpdates,
+    ignoredUpdateVersion,
+    isEnglish,
+    language,
+    showToast,
+    syncStateFromConfig,
+  ]);
 
   // 首次启动加载配置与数据
   useEffect(() => {
@@ -489,7 +606,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
         if (isTauriRuntime()) {
           const cfg = await getAppConfig();
           if (!active) return;
-          setConfig(cfg);
+          syncStateFromConfig(cfg);
           const cfgAppearance = parseAppearance(cfg.appearanceMode);
           const cfgLanguage = parseLanguage(cfg.language);
           setAppearanceModeState(cfgAppearance);
@@ -525,6 +642,15 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
               backupsDirPath: "%APPDATA%\\WetShaveJournal\\Backups",
               appearanceMode,
               language,
+              aiEnabled: false,
+              aiPreset: "deepseek",
+              aiBaseUrl: "https://api.deepseek.com/v1",
+              aiModel: "deepseek-flash",
+              aiEnableWebSearch: true,
+              aiEnableGoogleSearch: false,
+              hasAiApiKey: false,
+              autoCheckUpdates: true,
+              ignoredUpdateVersion: "",
             });
           }
         }
@@ -754,6 +880,29 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
     [database, isEnglish, persistCandidate, showToast]
   );
 
+  const applyAuditProposals = useCallback(
+    async (
+      updates: GearAuditUpdateProposal[],
+      merges: GearAuditMergeProposal[],
+      undeterminedItems: GearItem[]
+    ) => {
+      const plan = planApplyAuditProposals(
+        updates,
+        merges,
+        undeterminedItems,
+        database,
+        isEnglish
+      );
+      if (!plan.didMutate) return { ok: true };
+      const res = await persistCandidate(plan.database, plan.shouldBackup);
+      if (res.ok && plan.toastMessage) {
+        showToast(plan.toastMessage);
+      }
+      return res;
+    },
+    [database, isEnglish, persistCandidate, showToast]
+  );
+
   const undoLastGearChange = useCallback(async () => {
     const plan = planUndoLastGearChange(database, isEnglish);
     if (!plan.didMutate) {
@@ -941,11 +1090,343 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, [showToast]);
 
+  // MARK: - AI 配置与 Windows 凭据管理器
+
+  const updateAiConfig = useCallback(
+    async (patch: Partial<Omit<AIConfigState, "hasApiKey">>) => {
+      const merged: AIConfigState = {
+        ...aiConfig,
+        ...patch,
+      };
+      setAiConfig(merged);
+      if (!isTauriRuntime()) return;
+      try {
+        const updated = await saveAiConfig({
+          enabled: merged.enabled,
+          preset: merged.preset,
+          baseUrl: merged.baseUrl,
+          model: merged.model,
+          enableWebSearch: merged.enableWebSearch,
+          enableGoogleSearch: merged.enableGoogleSearch,
+        });
+        syncStateFromConfig(updated);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        showToast(msg, { isError: true });
+      }
+    },
+    [aiConfig, showToast, syncStateFromConfig]
+  );
+
+  const saveApiKeyToKeyring = useCallback(
+    async (apiKey: string): Promise<boolean> => {
+      const trimmed = apiKey.trim();
+      if (!isTauriRuntime()) {
+        setAiConfig((prev) => ({ ...prev, hasApiKey: Boolean(trimmed) }));
+        return true;
+      }
+      try {
+        const updated = await setAiApiKey(trimmed);
+        syncStateFromConfig(updated);
+        showToast(
+          trimmed
+            ? t(
+                "API Key 已安全保存至系统凭据管理器",
+                "API key securely saved to Windows Credential Manager",
+                isEnglish
+              )
+            : t("已清空 API Key", "API key cleared", isEnglish)
+        );
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        showToast(msg, { isError: true });
+        return false;
+      }
+    },
+    [isEnglish, showToast, syncStateFromConfig]
+  );
+
+  const clearApiKeyFromKeyring = useCallback(async (): Promise<boolean> => {
+    if (!isTauriRuntime()) {
+      setAiConfig((prev) => ({ ...prev, hasApiKey: false }));
+      return true;
+    }
+    try {
+      const updated = await clearAiApiKey();
+      syncStateFromConfig(updated);
+      showToast(
+        t(
+          "已从系统凭据管理器清除 API Key",
+          "API key deleted from Credential Manager",
+          isEnglish
+        )
+      );
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(msg, { isError: true });
+      return false;
+    }
+  }, [isEnglish, showToast, syncStateFromConfig]);
+
+  const loadApiKeyFromKeyring = useCallback(async (): Promise<string> => {
+    if (!isTauriRuntime()) return "";
+    try {
+      return await getAiApiKey();
+    } catch {
+      return "";
+    }
+  }, []);
+
+  // MARK: - FlClash 风格 GitHub 联网更新
+
+  const setAutoCheckUpdates = useCallback(
+    (enabled: boolean) => {
+      setAutoCheckUpdatesState(enabled);
+      if (!isTauriRuntime()) return;
+      saveUpdatePreferences(enabled, ignoredUpdateVersion)
+        .then((updated) => syncStateFromConfig(updated))
+        .catch(() => {});
+    },
+    [ignoredUpdateVersion, syncStateFromConfig]
+  );
+
+  const checkForAppUpdates = useCallback(
+    async (manual: boolean) => {
+      if (isCheckingUpdate) return;
+      if (!isTauriRuntime()) {
+        if (manual) {
+          setUpdateStatusIsError(false);
+          setUpdateStatusIsUpToDate(true);
+          setUpdateStatusMessage(
+            t(
+              "请在桌面客户端中检查联网更新",
+              "Online update checks are available in the desktop app",
+              isEnglish
+            )
+          );
+        }
+        return;
+      }
+
+      setIsCheckingUpdate(true);
+      if (manual) {
+        setUpdateStatusMessage(null);
+        setUpdateStatusIsError(false);
+        setUpdateStatusIsUpToDate(false);
+      }
+
+      try {
+        const result = await checkForUpdates();
+        if (result.hasUpdate && result.release) {
+          if (!manual && result.release.version === ignoredUpdateVersion) {
+            return;
+          }
+          setUpdateDownloadState({ status: "idle" });
+          setAvailableUpdate(result.release);
+          if (manual) {
+            setUpdateStatusIsError(false);
+            setUpdateStatusIsUpToDate(false);
+            setUpdateStatusMessage(
+              t(
+                `发现新版本 v${result.release.version}`,
+                `Update available: v${result.release.version}`,
+                isEnglish
+              )
+            );
+          }
+        } else if (manual) {
+          setUpdateStatusIsError(false);
+          setUpdateStatusIsUpToDate(true);
+          setUpdateStatusMessage(
+            t(
+              `当前已是最新版本（v${result.currentVersion}）`,
+              `You're up to date (v${result.currentVersion})`,
+              isEnglish
+            )
+          );
+        }
+      } catch (err) {
+        if (manual) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setUpdateStatusIsError(true);
+          setUpdateStatusIsUpToDate(false);
+          setUpdateStatusMessage(
+            t(`检查更新失败：${msg}`, `Update check failed: ${msg}`, isEnglish)
+          );
+        }
+      } finally {
+        setIsCheckingUpdate(false);
+      }
+    },
+    [ignoredUpdateVersion, isCheckingUpdate, isEnglish]
+  );
+
+  // 冷启动延迟 2 秒静默检查更新
+  useEffect(() => {
+    if (isLoading || hasPerformedLaunchUpdateCheckRef.current) return;
+    hasPerformedLaunchUpdateCheckRef.current = true;
+    if (!autoCheckUpdates || !isTauriRuntime()) return;
+
+    const timer = window.setTimeout(() => {
+      void checkForAppUpdates(false);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [autoCheckUpdates, checkForAppUpdates, isLoading]);
+
+  // 订阅 Rust 后端流式下载进度事件
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let active = true;
+    let unlisten: (() => void) | null = null;
+
+    void listenUpdateDownloadProgress((evt) => {
+      if (!active) return;
+      setUpdateDownloadState((prev) => {
+        if (prev.status !== "downloading") return prev;
+        return {
+          status: "downloading",
+          progress: evt.progress,
+          downloadedBytes: evt.downloadedBytes,
+          totalBytes: evt.totalBytes,
+        };
+      });
+    }).then((fn) => {
+      if (!active) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      active = false;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  const startUpdateDownload = useCallback(async () => {
+    if (!availableUpdate?.matchedAsset) return;
+    if (updateDownloadState.status === "downloading") return;
+    const asset = availableUpdate.matchedAsset;
+    setUpdateDownloadState({
+      status: "downloading",
+      progress: 0,
+      downloadedBytes: 0,
+      totalBytes: asset.size,
+    });
+    try {
+      const savedPath = await downloadAndOpenUpdate({
+        downloadUrl: asset.browserDownloadUrl,
+        fileName: asset.name,
+        expectedSize: asset.size,
+      });
+      setUpdateDownloadState({ status: "completed", filePath: savedPath });
+      showToast(
+        t(
+          "更新包已下载至 Downloads 并启动安装程序",
+          "Installer downloaded to Downloads and launched",
+          isEnglish
+        )
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "CANCELLED") {
+        setUpdateDownloadState({ status: "idle" });
+      } else {
+        setUpdateDownloadState({ status: "failed", message: msg });
+      }
+    }
+  }, [availableUpdate, isEnglish, showToast, updateDownloadState.status]);
+
+  const cancelAppUpdateDownload = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      setUpdateDownloadState({ status: "idle" });
+      return;
+    }
+    try {
+      await cancelUpdateDownload();
+    } catch {
+      // ignore
+    }
+    setUpdateDownloadState({ status: "idle" });
+  }, []);
+
+  const ignoreAvailableUpdate = useCallback(async () => {
+    if (!availableUpdate) return;
+    const ver = availableUpdate.version;
+    if (updateDownloadState.status === "downloading") {
+      await cancelAppUpdateDownload();
+    }
+    setIgnoredUpdateVersion(ver);
+    setAvailableUpdate(null);
+    setUpdateDownloadState({ status: "idle" });
+    if (isTauriRuntime()) {
+      saveUpdatePreferences(autoCheckUpdates, ver)
+        .then((updated) => syncStateFromConfig(updated))
+        .catch(() => {});
+    }
+  }, [
+    autoCheckUpdates,
+    availableUpdate,
+    cancelAppUpdateDownload,
+    syncStateFromConfig,
+    updateDownloadState.status,
+  ]);
+
+  const dismissUpdateModal = useCallback(() => {
+    if (updateDownloadState.status === "downloading") {
+      void cancelAppUpdateDownload();
+    }
+    setAvailableUpdate(null);
+    setUpdateDownloadState({ status: "idle" });
+  }, [cancelAppUpdateDownload, updateDownloadState.status]);
+
+  const openExternalLink = useCallback(
+    async (url: string) => {
+      if (!isTauriRuntime()) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      try {
+        await openExternalUrl(url);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        showToast(msg, { isError: true });
+      }
+    },
+    [showToast]
+  );
+
+  const revealDownloadedFile = useCallback(
+    async (filePath: string) => {
+      if (!isTauriRuntime()) return;
+      try {
+        await revealFileInFolder(filePath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        showToast(msg, { isError: true });
+      }
+    },
+    [showToast]
+  );
+
   // 衍生快照（按 database 变更自动 memoize）
   const catalogSnapshot = useMemo(
     () => buildGearCatalogSnapshot(database),
     [database]
   );
+
+  const allPendingGearItems = useMemo(() => {
+    const pending: GearItem[] = [];
+    for (const cat of ALL_GEAR_CATEGORIES) {
+      for (const item of catalogSnapshot.itemsByCategory[cat] ?? []) {
+        if (item.isPending) pending.push(item);
+      }
+    }
+    return pending;
+  }, [catalogSnapshot]);
 
   const { parsedProcessByEntryID, entriesByDate } = useMemo(() => {
     const parsedMap: Record<string, ParsedProcess> = {};
@@ -967,6 +1448,28 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
     }
     return { parsedProcessByEntryID: parsedMap, entriesByDate: dateMap };
   }, [database.entries]);
+
+  const statisticsSnapshot = useMemo(
+    () =>
+      buildStatisticsSnapshot(
+        database,
+        catalogSnapshot,
+        parsedProcessByEntryID,
+        isEnglish
+      ),
+    [database, catalogSnapshot, parsedProcessByEntryID, isEnglish]
+  );
+
+  const getDiagnosisStatsSummary = useCallback(
+    () =>
+      buildDiagnosisStatsSummary(
+        database,
+        catalogSnapshot,
+        statisticsSnapshot,
+        parsedProcessByEntryID
+      ),
+    [database, catalogSnapshot, statisticsSnapshot, parsedProcessByEntryID]
+  );
 
   const getParsedProcess = useCallback(
     (entry: JournalEntry): ParsedProcess => {
@@ -1084,8 +1587,32 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       showToast,
       dismissToast,
       catalogSnapshot,
+      statisticsSnapshot,
+      allPendingGearItems,
       parsedProcessByEntryID,
       entriesByDate,
+      getDiagnosisStatsSummary,
+      aiConfig,
+      updateAiConfig,
+      saveApiKeyToKeyring,
+      clearApiKeyFromKeyring,
+      loadApiKeyFromKeyring,
+      autoCheckUpdates,
+      setAutoCheckUpdates,
+      ignoredUpdateVersion,
+      isCheckingUpdate,
+      availableUpdate,
+      updateStatusMessage,
+      updateStatusIsError,
+      updateStatusIsUpToDate,
+      updateDownloadState,
+      checkForAppUpdates,
+      startUpdateDownload,
+      cancelAppUpdateDownload,
+      ignoreAvailableUpdate,
+      dismissUpdateModal,
+      openExternalLink,
+      revealDownloadedFile,
       getParsedProcess,
       resolveGearItem,
       getSearchCandidates,
@@ -1106,6 +1633,7 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       mergeGearItem,
       splitRawKey,
       deleteGearItem,
+      applyAuditProposals,
       undoLastGearChange,
       copySOTD,
       chooseCustomDataDir,
@@ -1117,12 +1645,20 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       openActiveDataFolder,
     }),
     [
+      aiConfig,
+      allPendingGearItems,
       appearanceMode,
+      applyAuditProposals,
+      autoCheckUpdates,
+      availableUpdate,
       backupCount,
       brandLogos,
+      cancelAppUpdateDownload,
       catalogSnapshot,
+      checkForAppUpdates,
       checkRazorAdjustable,
       chooseCustomDataDir,
+      clearApiKeyFromKeyring,
       config,
       copySOTD,
       createQuickGear,
@@ -1130,37 +1666,54 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
       deleteEntry,
       deleteGearItem,
       dismissToast,
+      dismissUpdateModal,
       entriesByDate,
       exportGearCsv,
       exportJournalFile,
       getBrandLogo,
+      getDiagnosisStatsSummary,
       getEligibleDrawPool,
       getGearRawEntrySamples,
       getGearReferencedEntryCount,
       getParsedProcess,
       getSearchCandidates,
       getSuggestedNextBladeUse,
+      ignoreAvailableUpdate,
+      ignoredUpdateVersion,
       importJournalFile,
+      isCheckingUpdate,
       isEnglish,
       isLoading,
       isReadOnlyProtected,
       language,
+      loadApiKeyFromKeyring,
       loadErrorMessage,
       mergeGearItem,
       openActiveDataFolder,
+      openExternalLink,
       parsedProcessByEntryID,
       refreshBrandLogos,
       reloadJournal,
       resetDataDirToDefault,
       resolveGearItem,
+      revealDownloadedFile,
+      saveApiKeyToKeyring,
       setAppearanceMode,
+      setAutoCheckUpdates,
       setLanguage,
       showToast,
       splitRawKey,
+      startUpdateDownload,
+      statisticsSnapshot,
       toast,
       triggerBackupNow,
       undoLastGearChange,
+      updateAiConfig,
+      updateDownloadState,
       updateGearItem,
+      updateStatusIsError,
+      updateStatusIsUpToDate,
+      updateStatusMessage,
       uploadCustomBrandLogo,
       upsertEntry,
     ]

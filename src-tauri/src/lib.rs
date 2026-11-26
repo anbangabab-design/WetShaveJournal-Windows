@@ -1,7 +1,10 @@
+mod ai;
 mod config;
 mod logos;
 mod storage;
+mod updater;
 
+use ai::{AiChatRequest, AiChatResponse, AiConnectionTestResponse};
 use config::{
     build_config_response, load_persisted_config, resolve_active_data_dir, save_persisted_config,
     AppConfigResponse,
@@ -10,7 +13,9 @@ use logos::CustomLogoResult;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use storage::{BackupResult, LoadJournalResult, SaveJournalResult};
+use updater::{UpdateCheckResult, UpdaterState};
 
 #[tauri::command]
 fn get_app_config() -> Result<AppConfigResponse, String> {
@@ -47,6 +52,107 @@ fn save_preferences(
     cfg.language = language;
     save_persisted_config(&cfg)?;
     build_config_response(&cfg)
+}
+
+#[tauri::command]
+fn save_ai_config(
+    enabled: bool,
+    preset: String,
+    base_url: String,
+    model: String,
+    enable_web_search: bool,
+    enable_google_search: bool,
+) -> Result<AppConfigResponse, String> {
+    let mut cfg = load_persisted_config()?;
+    cfg.ai_enabled = enabled;
+    cfg.ai_preset = preset;
+    cfg.ai_base_url = base_url;
+    cfg.ai_model = model;
+    cfg.ai_enable_web_search = enable_web_search;
+    cfg.ai_enable_google_search = enable_google_search;
+    save_persisted_config(&cfg)?;
+    build_config_response(&cfg)
+}
+
+#[tauri::command]
+fn get_ai_api_key() -> Result<String, String> {
+    ai::get_stored_api_key()
+}
+
+#[tauri::command]
+fn set_ai_api_key(api_key: String) -> Result<AppConfigResponse, String> {
+    ai::set_stored_api_key(&api_key)?;
+    let cfg = load_persisted_config()?;
+    build_config_response(&cfg)
+}
+
+#[tauri::command]
+fn clear_ai_api_key() -> Result<AppConfigResponse, String> {
+    ai::clear_stored_api_key()?;
+    let cfg = load_persisted_config()?;
+    build_config_response(&cfg)
+}
+
+#[tauri::command]
+async fn ai_chat_completion(request: AiChatRequest) -> Result<AiChatResponse, String> {
+    ai::chat_completion(request).await
+}
+
+#[tauri::command]
+async fn ai_test_connection(
+    base_url: String,
+    model: String,
+    preset: String,
+    api_key_override: Option<String>,
+) -> Result<AiConnectionTestResponse, String> {
+    Ok(ai::test_connection(base_url, model, preset, api_key_override).await)
+}
+
+#[tauri::command]
+fn save_update_preferences(
+    auto_check_updates: bool,
+    ignored_update_version: String,
+) -> Result<AppConfigResponse, String> {
+    let mut cfg = load_persisted_config()?;
+    cfg.auto_check_updates = auto_check_updates;
+    cfg.ignored_update_version = ignored_update_version;
+    save_persisted_config(&cfg)?;
+    build_config_response(&cfg)
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<UpdateCheckResult, String> {
+    updater::check_for_updates().await
+}
+
+#[tauri::command]
+async fn download_and_open_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, UpdaterState>,
+    download_url: String,
+    file_name: String,
+    expected_size: u64,
+) -> Result<String, String> {
+    let cancel_flag = state.cancel_flag.clone();
+    updater::download_and_open_update(app, cancel_flag, download_url, file_name, expected_size)
+        .await
+}
+
+#[tauri::command]
+fn cancel_update_download(state: tauri::State<'_, UpdaterState>) -> Result<(), String> {
+    state.cancel_flag.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    updater::open_external_url(&url)
+}
+
+#[tauri::command]
+fn reveal_file_in_folder(path: String) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    updater::reveal_file_in_folder(&target)
 }
 
 #[tauri::command]
@@ -117,12 +223,25 @@ fn export_csv(target_path: String, content: String) -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(UpdaterState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             get_app_config,
             set_custom_data_dir,
             save_preferences,
+            save_ai_config,
+            get_ai_api_key,
+            set_ai_api_key,
+            clear_ai_api_key,
+            ai_chat_completion,
+            ai_test_connection,
+            save_update_preferences,
+            check_for_updates,
+            download_and_open_update,
+            cancel_update_download,
+            open_external_url,
+            reveal_file_in_folder,
             load_journal,
             save_journal,
             backup_now,

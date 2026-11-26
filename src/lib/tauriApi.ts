@@ -1,12 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
+  AiChatRequestPayload,
+  AiChatResponsePayload,
+  AiConnectionTestResponse,
   AppConfigInfo,
   BackupResponse,
   CustomLogoResponse,
+  DownloadProgressEvent,
   JournalDatabase,
   LoadJournalResponse,
   SaveJournalResponse,
+  UpdateCheckResult,
 } from "../types/journal";
 
 export function isTauriRuntime(): boolean {
@@ -84,6 +90,91 @@ export async function exportCsvFile(
   content: string
 ): Promise<string> {
   return invoke<string>("export_csv", { targetPath, content });
+}
+
+export async function saveAiConfig(params: {
+  enabled: boolean;
+  preset: string;
+  baseUrl: string;
+  model: string;
+  enableWebSearch: boolean;
+  enableGoogleSearch: boolean;
+}): Promise<AppConfigInfo> {
+  return invoke<AppConfigInfo>("save_ai_config", params);
+}
+
+export async function getAiApiKey(): Promise<string> {
+  return invoke<string>("get_ai_api_key");
+}
+
+export async function setAiApiKey(apiKey: string): Promise<AppConfigInfo> {
+  return invoke<AppConfigInfo>("set_ai_api_key", { apiKey });
+}
+
+export async function clearAiApiKey(): Promise<AppConfigInfo> {
+  return invoke<AppConfigInfo>("clear_ai_api_key");
+}
+
+export async function aiChatCompletion(
+  request: AiChatRequestPayload
+): Promise<AiChatResponsePayload> {
+  return invoke<AiChatResponsePayload>("ai_chat_completion", { request });
+}
+
+export async function aiTestConnection(params: {
+  baseUrl: string;
+  model: string;
+  preset: string;
+  apiKeyOverride?: string | null;
+}): Promise<AiConnectionTestResponse> {
+  return invoke<AiConnectionTestResponse>("ai_test_connection", {
+    baseUrl: params.baseUrl,
+    model: params.model,
+    preset: params.preset,
+    apiKeyOverride: params.apiKeyOverride ?? null,
+  });
+}
+
+export async function saveUpdatePreferences(
+  autoCheckUpdates: boolean,
+  ignoredUpdateVersion: string
+): Promise<AppConfigInfo> {
+  return invoke<AppConfigInfo>("save_update_preferences", {
+    autoCheckUpdates,
+    ignoredUpdateVersion,
+  });
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>("check_for_updates");
+}
+
+export async function downloadAndOpenUpdate(params: {
+  downloadUrl: string;
+  fileName: string;
+  expectedSize: number;
+}): Promise<string> {
+  return invoke<string>("download_and_open_update", params);
+}
+
+export async function cancelUpdateDownload(): Promise<void> {
+  return invoke<void>("cancel_update_download");
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  return invoke<void>("open_external_url", { url });
+}
+
+export async function revealFileInFolder(path: string): Promise<void> {
+  return invoke<void>("reveal_file_in_folder", { path });
+}
+
+export async function listenUpdateDownloadProgress(
+  handler: (payload: DownloadProgressEvent) => void
+): Promise<UnlistenFn> {
+  return listen<DownloadProgressEvent>("update-download-progress", (event) => {
+    handler(event.payload);
+  });
 }
 
 export async function pickBrandLogoImageDialog(

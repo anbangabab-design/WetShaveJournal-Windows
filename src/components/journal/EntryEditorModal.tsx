@@ -3,11 +3,17 @@ import {
   AlertTriangle,
   CheckCircle2,
   Circle,
+  Loader2,
   Minus,
   Plus,
   RotateCcw,
+  Sparkles,
   X,
 } from "lucide-react";
+import {
+  isAIConfigReady,
+  parseNaturalLanguageSOTD,
+} from "../../lib/aiService";
 import { parseBladeUsage } from "../../lib/gearKnowledge";
 import {
   categorySingularName,
@@ -39,11 +45,13 @@ import {
 } from "../../lib/processParser";
 import { useJournal } from "../../store/JournalContext";
 import {
+  ALL_GEAR_CATEGORIES,
   ALL_IRRITATION_LEVELS,
   ALL_LATHERING_METHODS,
   ALL_LOADING_METHODS,
   ALL_SHAVE_PASS_TYPES,
   ALL_SHAVE_RESULTS,
+  type GearCategory,
   type IrritationLevel,
   type JournalEntry,
   type LatheringMethod,
@@ -90,6 +98,8 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
 }) => {
   const {
     database,
+    catalogSnapshot,
+    aiConfig,
     isEnglish,
     isReadOnlyProtected,
     checkRazorAdjustable,
@@ -97,6 +107,14 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
     upsertEntry,
     showToast,
   } = useJournal();
+
+  // AI 一句话自然语言快速填表
+  const [naturalInput, setNaturalInput] = useState("");
+  const [isParsingNatural, setIsParsingNatural] = useState(false);
+  const [naturalStatus, setNaturalStatus] = useState<{
+    message: string;
+    isError: boolean;
+  } | null>(null);
 
   const [dateStr, setDateStr] = useState<string>(() => formatDateISO(new Date()));
   const [razor, setRazor] = useState("");
@@ -126,6 +144,8 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
   useEffect(() => {
     if (!open) return;
     setSaveError(null);
+    setNaturalInput("");
+    setNaturalStatus(null);
 
     if (editingEntry) {
       setDateStr(editingEntry.date || formatDateISO(new Date()));
@@ -248,6 +268,87 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
   );
 
   if (!open) return null;
+
+  const handleNaturalLanguageParse = async () => {
+    const sentence = naturalInput.trim();
+    if (!sentence || isParsingNatural) return;
+    if (!isAIConfigReady(aiConfig)) {
+      setNaturalStatus({
+        message: t(
+          "请先在「外观与设置 → AI 识别接口」中启用并保存 API Key",
+          "Enable and save your AI API key in Settings first",
+          isEnglish
+        ),
+        isError: true,
+      });
+      return;
+    }
+
+    setIsParsingNatural(true);
+    setNaturalStatus(null);
+    try {
+      const catalogNames = {} as Record<GearCategory, string[]>;
+      for (const cat of ALL_GEAR_CATEGORIES) {
+        catalogNames[cat] = (catalogSnapshot.itemsByCategory[cat] ?? []).map(
+          (item) => item.name
+        );
+      }
+
+      const parsed = await parseNaturalLanguageSOTD(
+        sentence,
+        catalogNames,
+        aiConfig,
+        isEnglish
+      );
+
+      if (parsed.razor) setRazor(parsed.razor);
+      if (parsed.blade) {
+        setBladeBase(parsed.blade);
+        setBladeUseCount(
+          parsed.bladeUseCount ?? getSuggestedNextBladeUse(parsed.blade)
+        );
+      } else if (parsed.bladeUseCount !== null) {
+        setBladeUseCount(parsed.bladeUseCount);
+      }
+      if (parsed.brush) setBrush(parsed.brush);
+      if (parsed.soap) setSoap(parsed.soap);
+      if (parsed.bowl) setBowlName(parsed.bowl);
+      if (parsed.preShave) setPreShave(parsed.preShave);
+      if (parsed.afterShave) setAfterShave(parsed.afterShave);
+      if (parsed.loadingMethod) setLoadingMethod(parsed.loadingMethod);
+      if (parsed.latheringMethod) setLatheringMode(parsed.latheringMethod);
+      if (parsed.hotTowel !== null) setHotTowel(parsed.hotTowel);
+      if (parsed.afterShower !== null) setAfterShower(parsed.afterShower);
+      if (parsed.useAlum !== null) setUseAlum(parsed.useAlum);
+      if (parsed.passes.length > 0) {
+        const nextPasses: Partial<Record<ShavePassType, string>> = {};
+        for (const step of parsed.passes) {
+          nextPasses[step.pass] = step.setting;
+        }
+        setSelectedPasses(nextPasses);
+      }
+      if (parsed.result) setShaveResult(parsed.result);
+      if (parsed.irritation) setIrritation(parsed.irritation);
+      if (parsed.note) setProcessNote(parsed.note);
+
+      setNaturalStatus({
+        message: t(
+          "已自动解析并预填表单，核对无误后点击保存即可",
+          "Parsed and pre-filled form. Review and click Save.",
+          isEnglish
+        ),
+        isError: false,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setNaturalStatus({
+        message: t(`解析失败：${msg}`, `Parse failed: ${msg}`, isEnglish),
+        isError: true,
+      });
+    } finally {
+      setIsParsingNatural(false);
+    }
+  };
 
   const togglePass = (pass: ShavePassType) => {
     setSelectedPasses((prev) => {
@@ -385,6 +486,60 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
 
         {/* 表单滚动区 */}
         <div className="flex-1 space-y-4 overflow-y-auto p-5">
+          {/* AI 功能 ①：一句话自然语言快速记 SOTD */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <div className="flex flex-1 items-center gap-2 rounded-[10px] border border-[var(--wsj-accent)]/35 bg-[var(--wsj-card)] px-3 py-2 focus-within:border-[var(--wsj-accent)]">
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--wsj-accent)]" />
+                <input
+                  type="text"
+                  value={naturalInput}
+                  onChange={(e) => setNaturalInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void handleNaturalLanguageParse();
+                    }
+                  }}
+                  placeholder={t(
+                    "一句话快速记 SOTD：如「浴后热敷，黑鸟钛配俄纸第2次，Shavemac 26刷，MDC苦艾碗起，顺逆补无痛BBS」",
+                    "Quick SOTD: e.g., Post-shower hot towel, Blackbird Ti + Nacet 2nd, Shavemac 26mm, MDC Absinthe bowl lather, WTG/ATG painless BBS",
+                    isEnglish
+                  )}
+                  className="w-full bg-transparent text-[13px] text-[var(--wsj-text)] placeholder:text-[var(--wsj-text-tertiary)] outline-none"
+                />
+              </div>
+
+              <button
+                type="button"
+                disabled={isParsingNatural || !naturalInput.trim()}
+                onClick={() => void handleNaturalLanguageParse()}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-[10px] bg-[var(--wsj-accent)] px-3.5 py-2 text-[13px] font-semibold text-white transition hover:opacity-90 disabled:opacity-45"
+              >
+                {isParsingNatural ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5" />
+                )}
+                {isParsingNatural
+                  ? t("解析中...", "Parsing...", isEnglish)
+                  : t("AI 解析填表", "AI Parse", isEnglish)}
+              </button>
+            </div>
+
+            {naturalStatus && (
+              <div
+                className={`pl-1 text-[12px] ${
+                  naturalStatus.isError
+                    ? "text-[#D1851F]"
+                    : "text-[#2E8F5C]"
+                }`}
+              >
+                {naturalStatus.message}
+              </div>
+            )}
+          </div>
+
           {/* 1. 装备搭配 */}
           <SectionCard>
             <div className="space-y-4">

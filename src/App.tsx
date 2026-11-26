@@ -9,10 +9,11 @@ import { Sidebar } from "./components/Sidebar";
 import { GearLibraryView } from "./components/gear/GearLibraryView";
 import { EntryEditorModal } from "./components/journal/EntryEditorModal";
 import { JournalView } from "./components/journal/JournalView";
-import { PlaceholderView } from "./components/placeholders/PlaceholderView";
 import { RandomDrawView } from "./components/randomDraw/RandomDrawView";
 import { SettingsView } from "./components/settings/SettingsView";
+import { StatsView } from "./components/stats/StatsView";
 import { ToastBar } from "./components/ui/ToastBar";
+import { UpdateModal } from "./components/update/UpdateModal";
 import { t, tabDisplayName } from "./lib/l10n";
 import { JournalProvider, useJournal } from "./store/JournalContext";
 import type { AppTab, SOTDDraft } from "./types/journal";
@@ -64,7 +65,7 @@ const AppShell: React.FC = () => {
           </div>
         </header>
 
-        {/* 只读保护横幅（与 Mac 版一致：journal.json 解码失败时阻止覆盖原数据） */}
+        {/* 只读保护横幅 */}
         {isReadOnlyProtected && (
           <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-[#CC3D3D]/25 bg-[#CC3D3D]/10 px-5 py-2.5">
             <ShieldAlert className="h-4 w-4 shrink-0 text-[#CC3D3D]" />
@@ -115,10 +116,10 @@ const AppShell: React.FC = () => {
             <GearLibraryView />
           ) : selectedTab === "randomDraw" ? (
             <RandomDrawView onRecordSOTD={(draft) => openNewEntry(draft)} />
-          ) : selectedTab === "settings" ? (
-            <SettingsView />
+          ) : selectedTab === "stats" ? (
+            <StatsView />
           ) : (
-            <PlaceholderView section={selectedTab} />
+            <SettingsView />
           )}
         </main>
       </div>
@@ -136,6 +137,9 @@ const AppShell: React.FC = () => {
           setSelectedTab("journal");
         }}
       />
+
+      {/* FlClash 风格联网更新弹窗 */}
+      <UpdateModal />
 
       {/* 底部 Toast */}
       <ToastBar toast={toast} onDismiss={dismissToast} />
