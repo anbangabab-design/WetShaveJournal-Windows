@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --wsj-canvas: #f5f6f8;
+  --wsj-sidebar: #eff1f5;
+  --wsj-card: #ffffff;
+  --wsj-subtle: rgba(0, 0, 0, 0.042);
+  --wsj-pill: rgba(0, 0, 0, 0.055);
+  --wsj-border: rgba(0, 0, 0, 0.08);
+  --wsj-text: #16181d;
+  --wsj-text-secondary: #626875;
+  --wsj-text-tertiary: #8d94a1;
+  --wsj-accent: #2973cc;
+  --wsj-accent-soft: rgba(41, 115, 204, 0.11);
+  color-scheme: light;
+}
+
+html.dark {
+  --wsj-canvas: #18191b;
+  --wsj-sidebar: #141518;
+  --wsj-card: #242629;
+  --wsj-subtle: rgba(255, 255, 255, 0.065);
+  --wsj-pill: rgba(255, 255, 255, 0.085);
+  --wsj-border: rgba(255, 255, 255, 0.095);
+  --wsj-text: #f1f3f6;
+  --wsj-text-secondary: #9aa0ab;
+  --wsj-text-tertiary: #6e7582;
+  --wsj-accent: #3b88e8;
+  --wsj-accent-soft: rgba(59, 136, 232, 0.16);
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: var(--wsj-canvas);
+  color: var(--wsj-text);
+  font-family:
+    "Segoe UI Variable",
+    "Segoe UI",
+    "Microsoft YaHei UI",
+    "PingFang SC",
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}
+
+/* 细微克制的桌面端滚动条 */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 134, 145, 0.28);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 134, 145, 0.45);
+}
+
+/* 日期输入框图标在深色模式下的清晰度 */
+html.dark input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.85);
+}
